@@ -1,0 +1,45 @@
+
+seed: 42
+seeds: [0, 1, 2] # Classifier/training seeds. The data split directory is fixed.
+device: cuda:1
+output_dir: /projects/compures/nicolas/signal_sr/src/prehoc/outputs/nlm_fullbiased_bilinear_sweep
+run_id: null
+
+data:
+  root: /projects/compures/datasets/NLM/crops
+  split_dir: data/nlm/splits/biased/kfolds/seed_42
+  # Expects train_fold_1.csv, val_fold_1.csv, ..., train_fold_K.csv, val_fold_K.csv.
+  kfold:
+    enabled: true
+    num_folds: 5
+    folds: null
+  image_size: 128
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  max_samples_per_split: null
+
+degradation:
+  type: bilinear
+  levels: [1, 2, 4, 6, 8, 16, 32, 64]
+  batch_size: 512
+
+  # Used only when type: mc_psf.
+  native_pixel_size_um: 0.1
+  continuous_upsampling_factor: 4
+  mc_psf_sigma_hr_px: 1.0
+  mc_n_samples: 8
+
+model:
+  backbone: resnet18
+  in_channels: 3
+  resnet_pretrained: true
+
+train:
+  epochs: 10
+  batch_size: 512
+  lr: 0.001
+  weight_decay: 0.0001
+
+eval:
+  threshold: 0.5

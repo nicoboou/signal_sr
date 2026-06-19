@@ -1,0 +1,87 @@
+space: pixel
+seed: 42
+image_size: 128
+scale: 2
+lr_size: 64
+
+data:
+  name: nlm
+  root: /projects/compures/datasets/NLM/crops
+  split_dir: /projects/compures/nicolas/signal_sr/data/nlm/splits/natural/seed_42
+  image_size: 128
+  scale: 2
+  channels: 3
+  split_strategy: train_hr_val_test_lr
+  return_pair: false
+
+val_data:
+  return_pair: true
+
+test_data:
+  return_pair: true
+
+phase_defaults:
+  train_file: train_pixel.py
+  infer_file: infer.py
+
+denoiser:
+  target: diffusers.UNet2DModel
+  params:
+    sample_size: 128
+    in_channels: 6
+    out_channels: 3
+    layers_per_block: 2
+    block_out_channels: [64, 128, 256, 256]
+    down_block_types: [DownBlock2D, DownBlock2D, DownBlock2D, AttnDownBlock2D]
+    up_block_types: [AttnUpBlock2D, UpBlock2D, UpBlock2D, UpBlock2D]
+    dropout: 0.1
+    norm_num_groups: 32
+
+objective:
+  name: diffusion
+  prediction_type: sample
+
+noise_scheduler:
+  name: DDPMScheduler
+  num_train_timesteps: 1000
+  n_infer_steps: 50
+  prediction_type: sample
+  beta_schedule: linear
+  beta_start: 0.0001
+  beta_end: 0.02
+  timestep_spacing: linspace
+  clip_sample: true
+
+sampling:
+  method: eps
+  eps:
+    operator: super_resolution
+    downsample_mode: nearest
+    sigma_y: 0.05
+
+measurement:
+  space: lr
+  downsample_mode: nearest
+  sigma_y: 0.05
+
+inversion:
+  method: auto
+
+train:
+  batch_size: 64
+  lr: 1e-4
+  max_steps: 300000
+  mixed_precision: fp16
+  log_every: 50
+  sample_every: 100
+  save_every: 10000
+
+evaluation:
+  mind:
+    enabled: false
+  fid:
+    enabled: false
+
+wandb:
+  enabled: true
+  project: signal_sr
