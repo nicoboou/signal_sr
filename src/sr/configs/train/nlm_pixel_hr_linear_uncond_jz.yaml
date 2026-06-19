@@ -1,0 +1,43 @@
+# Jean Zay launch config for scripts/submit_jeanzay.py.
+# Submit with:
+#   python scripts/submit_jeanzay.py sr --jz-config src/sr/configs/train/nlm_pixel_hr_linear_uncond_jz.yaml
+pipeline: sr
+base_config: src/sr/configs/train/nlm_pixel_hr_linear_uncond.yaml
+
+job:
+  name: sr_nlm_pixel_hr_linear_uncond
+
+paths:
+  scratch_root: ${SCRATCH}/signal_sr
+  output_root: ${SCRATCH}/signal_sr/runs/sr/nlm_pixel_hr_linear_uncond
+
+runtime:
+  # Adjust if your virtualenv lives elsewhere on Jean Zay.
+  python: ${WORK}/signal_sr/.venv/bin/python
+
+slurm:
+  account: wbg@a100
+  partition: gpu_p5
+  constraint: a100
+  qos: qos_gpu_a100-t4
+  time_min: 3000
+  nodes: 1
+  tasks_per_node: 1
+  gpus: 4
+  gres: gpu:4
+  # This launcher starts one local Accelerate command; reserve 10 CPU/GPU on V100 quad nodes.
+  cpus_per_task: 40
+  hint: nomultithread
+
+data:
+  root: ${SCRATCH}/NLM/crops
+
+wandb:
+  enabled: true
+  project: signal_sr
+  entity: null
+
+training:
+  num_workers: 8
+  mixed_precision: fp16
+  args: []

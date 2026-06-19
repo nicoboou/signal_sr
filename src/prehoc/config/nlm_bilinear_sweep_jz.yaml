@@ -1,0 +1,44 @@
+# Jean Zay launch config for scripts/submit_jeanzay.py.
+# Submit with:
+#   python scripts/submit_jeanzay.py prehoc --jz-config src/prehoc/config/nlm_bilinear_sweep_jz.yaml
+pipeline: prehoc
+base_config: src/prehoc/config/nlm_bilinear_sweep.yaml
+
+job:
+  name: prehoc_nlm_bilinear_sweep
+
+paths:
+  scratch_root: ${SCRATCH}/signal_sr
+  output_root: ${SCRATCH}/signal_sr/runs/prehoc/nlm_bilinear_sweep
+
+runtime:
+  # Adjust if virtualenv lives elsewhere on Jean Zay.
+  python: ${WORK}/signal_sr/.venv/bin/python
+
+slurm:
+  # If IDRPROJ is not set, replace with e.g. myproject@v100.
+  account: ${IDRPROJ}@v100
+  partition: null
+  constraint: null
+  qos: qos_gpu-dev
+  time_min: 120
+  nodes: 1
+  tasks_per_node: 1
+  gpus: 1
+  gres: gpu:1
+  cpus_per_task: 10
+  hint: nomultithread
+
+data:
+  root: ${WORK}/datasets/NLM/crops
+  split_dir: data/nlm/splits/natural/kfolds/seed_42
+
+wandb:
+  enabled: true
+  project: signal_sr
+  entity: null
+
+training:
+  # Compute nodes have no internet; avoid downloading ResNet weights at runtime.
+  disable_pretrained: true
+  args: []

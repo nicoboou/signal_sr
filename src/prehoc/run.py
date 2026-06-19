@@ -335,6 +335,52 @@ def plot_metrics(results, output_path, summary=None):
     plt.close(fig)
 
 
+def _safe_wandb_artifact_name(value):
+    safe = "".join(char if char.isalnum() or char in {"-", "_", "."} else "_" for char in str(value))
+    return (safe.strip("_") or "prehoc-results")[:120]
+
+
+def log_wandb_outputs(config, output_dir, results, summary):
+    wandb_cfg = config.get("wandb", {}) or {}
+    if not wandb_cfg.get("enabled", False):
+        return
+    try:
+        import wandb
+    except ImportError:
+        print("wandb.enabled=true but wandb is not installed; skipping W&B logging")
+        return
+
+    run_id = wandb_cfg.get("id") or config.get("run_id")
+    init_kwargs = {
+        "project": wandb_cfg.get("project", "signal_sr"),
+        "config": config,
+    }
+    if run_id:
+        run_id = str(run_id)
+        init_kwargs.update(
+            {
+                "id": run_id,
+                "name": wandb_cfg.get("name", run_id),
+                "resume": wandb_cfg.get("resume", "allow"),
+            }
+        )
+    for key in ("entity", "group", "tags", "notes", "job_type"):
+        if key in wandb_cfg:
+            init_kwargs[key] = wandb_cfg[key]
+
+    run = wandb.init(**init_kwargs)
+    try:
+        run.log({"metrics": wandb.Table(dataframe=results), "metrics_summary": wandb.Table(dataframe=summary)})
+        artifact = wandb.Artifact(_safe_wandb_artifact_name(f"{config.get('run_id', run_id)}_prehoc_results"), type="results")
+        for filename in ("metrics.csv", "metrics_summary.csv", "metrics.pdf", "config.yaml", "argv.json"):
+            path = Path(output_dir) / filename
+            if path.exists():
+                artifact.add_file(str(path), name=filename)
+        run.log_artifact(artifact)
+    finally:
+        run.finish()
+
+
 def run(config, config_path=None):
     seed_everything(int(config.get("seed", 0)))
     config["device"] = choose_device(config.get("device", "cpu"))
@@ -374,6 +420,7 @@ def run(config, config_path=None):
     summary = summarize_metrics(results)
     summary.to_csv(output_dir / "metrics_summary.csv", index=False)
     plot_metrics(results, output_dir / "metrics.pdf", summary=summary)
+    log_wandb_outputs(config, output_dir, results, summary)
     print(f"Wrote {output_dir / 'metrics.csv'}")
     print(f"Wrote {output_dir / 'metrics_summary.csv'}")
     print(f"Wrote {output_dir / 'metrics.pdf'}")

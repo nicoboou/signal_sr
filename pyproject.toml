@@ -25,6 +25,7 @@ dependencies = [
   "pyyaml>=6.0",
   "scikit-image>=0.22",
   "scikit-learn>=1.7.2",
+  "submitit>=1.5",
   "scipy>=1.10",
   "torch==2.10.0",
   "torchvision>=0.25.0",

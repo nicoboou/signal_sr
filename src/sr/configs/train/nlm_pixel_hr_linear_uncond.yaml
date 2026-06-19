@@ -7,7 +7,7 @@ lr_size: 64
 data:
   name: nlm
   root: /projects/compures/datasets/NLM/crops
-  split_dir: /projects/compures/nicolas/signal_sr/data/nlm/splits/natural/seed_42
+  split_dir: data/nlm/splits/semi_biased/single/seed_2026 # PARASITIZED = 80% / UNINFECTED = 20%
   image_size: 128
   scale: 2
   channels: 3
@@ -67,7 +67,7 @@ sampling:
     loss: l2_norm
 
 train:
-  batch_size: 64
+  batch_size: 128
   lr: 1e-4
   max_steps: 300000
   mixed_precision: fp16

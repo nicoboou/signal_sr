@@ -42,6 +42,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--run-id", default=None)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -120,6 +121,20 @@ def _loader_num_samples(loader):
         return int(len(dataset))
     except TypeError:
         return None
+
+
+def _wandb_init_kwargs(cfg):
+    wandb_cfg = cfg.get("wandb", {})
+    init_kwargs = {}
+    run_id = cfg.train.get("run_id", None)
+    if run_id:
+        init_kwargs["id"] = str(wandb_cfg.get("id", run_id))
+        init_kwargs["name"] = str(wandb_cfg.get("name", run_id))
+        init_kwargs["resume"] = wandb_cfg.get("resume", "allow")
+    for key in ("entity", "group", "tags", "notes", "job_type"):
+        if key in wandb_cfg:
+            init_kwargs[key] = wandb_cfg[key]
+    return {"wandb": init_kwargs} if init_kwargs else None
 
 
 def _effective_metric_n_samples(metric_cfg, loader, default=50000):
@@ -508,7 +523,7 @@ def main():
     base_output_dir = resolve_path(args.output_dir or cfg.train.get("output_dir", default_train_output_base(args.config)))
     output_info = [str(base_output_dir), None, None]
     if accelerator.is_main_process:
-        output_dir, run_id = make_run_output_dir(base_output_dir)
+        output_dir, run_id = make_run_output_dir(base_output_dir, args.run_id or cfg.train.get("run_id", None))
         output_info = [str(base_output_dir), str(output_dir), run_id]
         with (output_dir / "argv.json").open("w", encoding="utf-8") as handle:
             json.dump({"argv": sys.argv}, handle, indent=2)
@@ -520,7 +535,11 @@ def main():
     cfg.train.run_id = output_info[2]
 
     if cfg.get("wandb", {}).get("enabled", False):
-        accelerator.init_trackers(cfg.wandb.project, config=to_plain(cfg))
+        wandb_init_kwargs = _wandb_init_kwargs(cfg)
+        if wandb_init_kwargs:
+            accelerator.init_trackers(cfg.wandb.project, config=to_plain(cfg), init_kwargs=wandb_init_kwargs)
+        else:
+            accelerator.init_trackers(cfg.wandb.project, config=to_plain(cfg))
 
     concat_conditioning = _uses_concat_conditioning(cfg)
     train_data_cfg = merge_dict(cfg.data, {})
