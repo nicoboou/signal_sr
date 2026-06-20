@@ -5,8 +5,8 @@ import json
 import os
 import shlex
 import shutil
+import socket
 import subprocess
-import sys
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -30,6 +30,13 @@ SNAPSHOT_EXCLUDE_NAMES = {
 }
 
 
+@dataclass(frozen=True)
+class PythonEnvironment:
+    python_executable: str
+    env_updates: dict[str, str]
+    venv_path: str | None
+
+
 @dataclass
 class JobRunner:
     code_dir: str
@@ -47,6 +54,73 @@ class JobRunner:
             if env.get(key):
                 Path(env[key]).mkdir(parents=True, exist_ok=True)
         subprocess.run(self.command, cwd=code_dir, env=env, check=True)
+
+
+def find_free_port(default: int = 29500) -> int:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("", 0))
+            return int(sock.getsockname()[1])
+    except OSError:
+        return default
+
+
+def prepend_path(entry: str, current: str | None) -> str:
+    return f"{entry}:{current}" if current else entry
+
+
+def as_list(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return [str(value)]
+
+
+def resolve_python_environment(args: argparse.Namespace) -> PythonEnvironment:
+    env_updates: dict[str, str] = {}
+
+    if args.python:
+        python_value = os.path.expandvars(args.python)
+        if os.sep in python_value or (os.altsep and os.altsep in python_value):
+            python_path = Path(python_value).expanduser()
+            if not python_path.exists():
+                raise FileNotFoundError(f"Requested Python executable does not exist: {python_path}")
+            return PythonEnvironment(str(python_path.resolve()), env_updates, None)
+        return PythonEnvironment(python_value, env_updates, None)
+
+    if args.venv_path:
+        venv_path = Path(os.path.expandvars(args.venv_path)).expanduser().resolve()
+        python_path = venv_path / "bin" / "python"
+        if not python_path.exists():
+            raise FileNotFoundError(f"Requested virtualenv does not contain a Python executable: {python_path}")
+        env_updates["VIRTUAL_ENV"] = str(venv_path)
+        env_updates["PATH"] = prepend_path(str(venv_path / "bin"), os.environ.get("PATH"))
+        return PythonEnvironment(str(python_path), env_updates, str(venv_path))
+
+    return PythonEnvironment("python", env_updates, None)
+
+
+def resolve_runtime_executable(python_env: PythonEnvironment, executable_name: str) -> str:
+    if python_env.venv_path:
+        candidate = Path(python_env.venv_path) / "bin" / executable_name
+        if candidate.exists():
+            return str(candidate)
+
+    return executable_name
+
+
+def wrap_with_module_bootstrap(cmd: list[str], module_loads: list[str], *, module_purge: bool) -> list[str]:
+    if not module_loads and not module_purge:
+        return cmd
+
+    shell_steps: list[str] = []
+    if module_purge:
+        shell_steps.append("module purge")
+    for module_name in module_loads:
+        shell_steps.append(f"module load {shlex.quote(module_name)}")
+    shell_steps.append(f"exec {shlex.join(cmd)}")
+    return ["bash", "-lc", " && ".join(shell_steps)]
 
 
 def safe_name(value: str) -> str:
@@ -133,6 +207,9 @@ def apply_jz_config(args: argparse.Namespace) -> argparse.Namespace:
     args.scratch_root = args.scratch_root or paths_cfg.get("scratch_root")
     args.output_root = args.output_root or paths_cfg.get("output_root")
     args.python = args.python or runtime_cfg.get("python")
+    args.venv_path = args.venv_path or runtime_cfg.get("venv_path")
+    args.module_load = [*as_list(runtime_cfg.get("module_load")), *as_list(args.module_load)]
+    args.module_purge = bool(args.module_purge or runtime_cfg.get("module_purge", False))
     args.data_root = args.data_root or data_cfg.get("root")
     args.split_dir = args.split_dir or data_cfg.get("split_dir")
     args.account = args.account or slurm_cfg.get("account")
@@ -156,6 +233,11 @@ def apply_jz_config(args: argparse.Namespace) -> argparse.Namespace:
     if args.pipeline == "prehoc":
         args.disable_pretrained = bool(args.disable_pretrained or train_cfg.get("disable_pretrained", False))
     else:
+        args.launcher = args.launcher or runtime_cfg.get("launcher")
+        args.accelerate_config = args.accelerate_config or runtime_cfg.get("accelerate_config")
+        args.main_process_port = args.main_process_port or runtime_cfg.get("main_process_port")
+        if args.srun_overlap is None and "srun_overlap" in runtime_cfg:
+            args.srun_overlap = bool(runtime_cfg.get("srun_overlap"))
         args.num_workers = args.num_workers or train_cfg.get("num_workers")
         args.mixed_precision = args.mixed_precision or train_cfg.get("mixed_precision")
 
@@ -168,15 +250,21 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
     args = apply_jz_config(args)
     if not args.config:
         raise SystemExit("Pass --config or provide base_config in --jz-config.")
-    args.python = args.python or sys.executable
     args.time_min = int(args.time_min or 120)
     args.nodes = int(args.nodes or 1)
     args.tasks_per_node = int(args.tasks_per_node or 1)
     args.gpus = int(args.gpus or 1)
-    args.gres = args.gres or f"gpu:{args.gpus}"
+    args.gres = args.gres or None
     args.cpus_per_task = int(args.cpus_per_task or default_cpus_per_task(args))
     args.hint = "nomultithread" if args.hint is None else args.hint
     if args.pipeline == "sr":
+        args.launcher = args.launcher or "auto"
+        if args.launcher == "auto":
+            args.launcher = "idr" if args.nodes == 1 else "srun-idr"
+        if args.launcher in {"accelerate", "idr"} and args.nodes != 1:
+            raise SystemExit(f"launcher={args.launcher!r} only supports one node; use launcher='srun-idr' for multi-node jobs.")
+        args.srun_overlap = True if args.srun_overlap is None else bool(args.srun_overlap)
+        args.main_process_port = int(args.main_process_port) if args.main_process_port is not None else None
         args.num_workers = int(args.num_workers or 8)
     return args
 
@@ -248,6 +336,8 @@ def patch_common_config(cfg: dict, args: argparse.Namespace, job_id: str, output
         train_cfg = cfg.setdefault("train", {})
         train_cfg["run_id"] = job_id
         train_cfg["output_dir"] = str(output_base)
+        if args.mixed_precision:
+            train_cfg["mixed_precision"] = args.mixed_precision
     return cfg
 
 
@@ -280,6 +370,7 @@ def build_env(scratch_root: Path) -> dict[str, str]:
         "TRANSFORMERS_OFFLINE": "1",
         "DIFFUSERS_OFFLINE": "1",
         "PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION": "python",
+        "PYTHONUNBUFFERED": "1",
     }
 
 
@@ -289,11 +380,12 @@ def build_command(
     config_path: Path,
     output_base: Path,
     job_id: str,
+    python_env: PythonEnvironment,
 ) -> list[str]:
     extra = clean_training_args(args.training_args)
     if args.pipeline == "prehoc":
         return [
-            args.python,
+            python_env.python_executable,
             "-m",
             "prehoc.run",
             "--config",
@@ -308,15 +400,7 @@ def build_command(
         ]
 
     mixed_precision = args.mixed_precision or str(cfg.get("train", {}).get("mixed_precision", "no"))
-    return [
-        args.python,
-        "-m",
-        "accelerate.commands.launch",
-        "--module",
-        "--num_processes",
-        str(args.gpus),
-        "--mixed_precision",
-        mixed_precision,
+    train_args = [
         "sr.train_pixel",
         "--config",
         str(config_path),
@@ -328,6 +412,46 @@ def build_command(
         str(args.num_workers),
         *extra,
     ]
+    if args.launcher == "accelerate":
+        command = [
+            python_env.python_executable,
+            "-m",
+            "accelerate.commands.launch",
+            "--gpu_ids",
+            ",".join(str(idx) for idx in range(args.gpus)),
+            "--num_processes",
+            str(args.gpus),
+            "--mixed_precision",
+            mixed_precision,
+            "--main_process_port",
+            str(args.main_process_port or find_free_port()),
+        ]
+        if args.accelerate_config:
+            command.extend(["--config_file", args.accelerate_config])
+        command.append("--module")
+        command.extend(train_args)
+        return command
+
+    idr_command = [resolve_runtime_executable(python_env, "idr_accelerate")]
+    if mixed_precision:
+        idr_command.extend(["--mixed_precision", mixed_precision])
+    if args.main_process_port is not None:
+        idr_command.extend(["--main_process_port", str(args.main_process_port)])
+    idr_command.append("--module")
+    idr_command.extend(train_args)
+
+    if args.launcher == "idr":
+        return idr_command
+    if args.launcher == "srun-idr":
+        srun_command = ["srun"]
+        if args.srun_overlap:
+            srun_command.append("--overlap")
+        srun_command.extend(["--ntasks", "1", "--cpus-per-task", str(args.cpus_per_task)])
+        if args.hint:
+            srun_command.extend(["--hint", args.hint])
+        srun_command.extend(idr_command)
+        return srun_command
+    raise SystemExit(f"Unsupported SR launcher: {args.launcher}")
 
 
 def create_bundle(args: argparse.Namespace) -> tuple[Path, list[str], dict[str, str], str]:
@@ -344,12 +468,18 @@ def create_bundle(args: argparse.Namespace) -> tuple[Path, list[str], dict[str, 
     output_base.mkdir(parents=True, exist_ok=True)
     copy_code_snapshot(code_dir)
 
+    python_env = resolve_python_environment(args)
+    args.python = python_env.python_executable
+    args.venv_path = python_env.venv_path or args.venv_path
+
     cfg = patch_common_config(load_yaml(config_source), args, job_id, output_base)
     bundled_config = bundle_dir / "config.yaml"
     write_yaml(bundled_config, cfg)
 
     env = build_env(scratch_root)
-    command = build_command(args, cfg, bundled_config, output_base, job_id)
+    env.update(python_env.env_updates)
+    command = build_command(args, cfg, bundled_config, output_base, job_id, python_env)
+    command = wrap_with_module_bootstrap(command, args.module_load, module_purge=args.module_purge)
     warnings = download_risk_warnings(cfg, args.pipeline)
 
     dump_text(bundle_dir / "command.txt", shlex.join(command) + "\n")
@@ -383,6 +513,8 @@ def submit_job(args: argparse.Namespace, bundle_dir: Path, command: list[str], e
     slurm_additional_parameters = {}
     if args.gres:
         slurm_additional_parameters["gres"] = args.gres
+    else:
+        params["gpus_per_node"] = int(args.gpus)
     if args.hint:
         slurm_additional_parameters["hint"] = args.hint
     if slurm_additional_parameters:
@@ -411,6 +543,9 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output-root", default=None, help="Base output directory. Default: <scratch-root>/runs/<pipeline>/<config-stem>")
     parser.add_argument("--job-name", default=None)
     parser.add_argument("--python", default=None)
+    parser.add_argument("--venv-path", default=None, help="Virtualenv to use inside the job. Not used unless explicitly provided.")
+    parser.add_argument("--module-load", action="append", default=[], help="Module to load before launching the job command. Repeatable.")
+    parser.add_argument("--module-purge", action="store_true", help="Run 'module purge' before --module-load entries.")
     parser.add_argument("--data-root", default=None)
     parser.add_argument("--split-dir", default=None)
     parser.add_argument("--wandb-project", default=None)
@@ -442,6 +577,11 @@ def parse_args() -> argparse.Namespace:
 
     sr = subparsers.add_parser("sr")
     add_common_args(sr)
+    sr.add_argument("--launcher", choices=["auto", "idr", "srun-idr", "accelerate"], default=None)
+    sr.add_argument("--accelerate-config", default=None, help="Optional accelerate config file for launcher=accelerate only.")
+    sr.add_argument("--main-process-port", "--main-port", dest="main_process_port", type=int, default=None)
+    sr.add_argument("--srun-overlap", dest="srun_overlap", action="store_true", default=None)
+    sr.add_argument("--no-srun-overlap", dest="srun_overlap", action="store_false")
     sr.add_argument("--num-workers", type=int, default=None)
     sr.add_argument("--mixed-precision", default=None)
     sr.add_argument("training_args", nargs=argparse.REMAINDER, help="Arguments after -- are passed to sr.train_pixel.")

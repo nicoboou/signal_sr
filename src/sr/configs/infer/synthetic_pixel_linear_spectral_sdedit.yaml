@@ -1,0 +1,101 @@
+space: pixel
+seed: 42
+image_size: 128
+scale: 4
+lr_size: 32
+
+data:
+  name: synthetic_microscopy
+  image_size: 128
+  scale: 4
+  lr_size: 32
+  channels: 1
+  split_dir: splits/synthetic_microscopy/train_hr_val_test_lr_seed0
+  split_strategy: train_hr_val_test_lr
+  split_seed: 0
+  split_ratios: [0.80, 0.05, 0.15]
+  return_pair: false
+  return_labels: true
+  return_masks: false
+  return_metadata: false
+
+synthetic_generation:
+  n_per_combination: 15000
+  image_size: 128
+  seed: 7
+  generator_kwargs:
+    parasite_filament_min_distance_px: 10
+
+val_data:
+  return_pair: true
+
+test_data:
+  return_pair: true
+
+phase_defaults:
+  train_file: train_pixel.py
+  infer_file: infer.py
+
+denoiser:
+  target: diffusers.UNet2DModel
+  params:
+    sample_size: 128
+    in_channels: 1
+    out_channels: 1
+    layers_per_block: 2
+    block_out_channels: [64, 128, 256]
+    down_block_types: [DownBlock2D, DownBlock2D, DownBlock2D]
+    up_block_types: [UpBlock2D, UpBlock2D, UpBlock2D]
+    num_class_embeds: 2
+
+objective:
+  name: diffusion
+  prediction_type: epsilon
+
+noise_scheduler:
+  name: DDPMScheduler
+  num_train_timesteps: 1000
+  prediction_type: epsilon
+  beta_schedule: linear
+  beta_start: 0.0001
+  beta_end: 0.02
+  timestep_spacing: linspace
+  clip_sample: false
+  n_infer_steps: 50
+
+inversion:
+  method: auto
+  ddim:
+    eta: 0.0
+
+sampling:
+  method: ddim
+
+spectral_sdedit:
+  enabled: true
+  mode: logfreq_budget
+  rho: 0.75
+  m_min: 0.0
+  m_max: 0.85
+  num_log_bins: 64
+  transform: dct
+  upsample_mode: nearest
+  init_formula: scheduler_compatible
+  allow_batch_size_gt_1: false
+
+measurement:
+  space: lr_up
+  downsample_mode: nearest
+
+train:
+  batch_size: 32
+  lr: 1e-4
+  max_steps: 200000
+  mixed_precision: fp16
+  log_every: 50
+  sample_every: 200
+  save_every: 10000
+
+wandb:
+  enabled: true
+  project: spectral_inversion

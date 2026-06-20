@@ -470,4 +470,13 @@ def image_metrics(
 
 
 def scalarize_metrics(metrics):
-    return {key: float(value.detach().mean().cpu()) for key, value in metrics.items() if torch.is_tensor(value)}
+    out = {}
+    for key, value in metrics.items():
+        if torch.is_tensor(value):
+            value = value.detach()
+            if not value.is_floating_point() and not value.is_complex():
+                value = value.float()
+            out[key] = float(value.mean().cpu())
+        elif isinstance(value, str | int | float | bool):
+            out[key] = value
+    return out

@@ -12,8 +12,9 @@ paths:
   output_root: ${SCRATCH}/signal_sr/runs/prehoc/nlm_bilinear_sweep
 
 runtime:
-  # Adjust if virtualenv lives elsewhere on Jean Zay.
-  python: ${WORK}/signal_sr/.venv/bin/python
+  # Optional: set venv_path if you want a specific Jean Zay virtualenv.
+  # If omitted, no virtualenv is activated; executables are resolved from the job PATH.
+  venv_path: null
 
 slurm:
   # If IDRPROJ is not set, replace with e.g. myproject@v100.
@@ -25,7 +26,7 @@ slurm:
   nodes: 1
   tasks_per_node: 1
   gpus: 1
-  gres: gpu:1
+  gres: null
   cpus_per_task: 10
   hint: nomultithread
 

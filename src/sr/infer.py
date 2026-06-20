@@ -12,12 +12,11 @@ import torch.nn.functional as F
 
 from .data import build_dataloader
 from .diagnostics import image_metrics, latent_metrics, scalarize_metrics
-from .inference import Inverter, Sampler, spectral_sedit_sr
+from .inference import Inverter, Sampler, spectral_sdedit_sr
 from .inference.inverter import freeze_for_inference
 from .models import build_autoencoder, build_conditioner, build_denoiser, denoiser_channels, denoiser_conditioning_mode
 from .objectives import Objective
 from .schedules import build_noise_scheduler
-from .schedules.spectral import rapsd
 from .splits import ensure_synthetic_split
 from .utils.checkpoints import load_model_weights
 from .utils.config import load_config, merge_dict, to_plain
@@ -29,7 +28,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--checkpoint", default=None)
-    parser.add_argument("--mode", choices=["invert", "sample", "invert_sample", "spectral_sedit_sr"], default="invert_sample")
+    parser.add_argument("--mode", choices=["invert", "sample", "invert_sample", "spectral_sdedit_sr"], default="invert_sample")
     parser.add_argument("--split", default="val")
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--num-samples", type=int, default=4)
@@ -108,11 +107,6 @@ def _log_wandb_inference(run, mode, metrics, images_dict):
         run.log(payload, step=0)
 
 
-def _rapsd_payload(x):
-    k, psd = rapsd(x.detach())
-    return {"k": k.detach().cpu(), "psd": psd.detach().cpu()}
-
-
 def main():
     args = parse_args()
     cfg = load_config(args.config)
@@ -120,13 +114,16 @@ def main():
         raise ValueError(f"{cfg.sampling.method} is a direct sampling method; use --mode sample instead of --mode invert_sample")
     if cfg.space == "latent" and cfg.sampling.method == "eps":
         raise ValueError("EPS currently supports only pixel-space inverse problems")
-    if args.mode == "spectral_sedit_sr":
+    if args.mode == "spectral_sdedit_sr":
         if cfg.space != "pixel":
-            raise ValueError("spectral_sedit_sr currently supports only space=pixel")
+            raise ValueError("spectral_sdedit_sr currently supports only space=pixel")
         if cfg.objective.name != "diffusion":
-            raise ValueError("spectral_sedit_sr requires objective.name=diffusion")
+            raise ValueError("spectral_sdedit_sr requires objective.name=diffusion")
         if cfg.noise_scheduler.name == "spectral_rapsd":
-            raise ValueError("spectral_sedit_sr must use the trained HR diffusion scheduler, not spectral_rapsd")
+            raise ValueError("spectral_sdedit_sr must use the trained HR diffusion scheduler, not spectral_rapsd")
+        sdedit_cfg = cfg.get("spectral_sdedit", cfg.sampling.get("spectral_sdedit", {}))
+        if args.num_samples > 1 and not sdedit_cfg.get("allow_batch_size_gt_1", False):
+            raise ValueError("spectral_sdedit_sr supports --num-samples 1 unless spectral_sdedit.allow_batch_size_gt_1=true")
     seed_everything(int(cfg.get("seed", 0)))
     if cfg.data.name == "synthetic_microscopy":
         ensure_synthetic_split(cfg)
@@ -156,7 +153,7 @@ def main():
     objective = Objective(cfg.objective, noise_scheduler)
     sampler = Sampler(cfg.sampling, objective, noise_scheduler, denoiser, conditioner, global_cfg=cfg)
     inverter = None
-    if args.mode != "spectral_sedit_sr":
+    if args.mode != "spectral_sdedit_sr":
         inverter = Inverter(cfg.inversion, cfg.sampling, objective, noise_scheduler, denoiser, conditioner, sampler)
 
     if args.checkpoint:
@@ -201,10 +198,11 @@ def main():
             if "hr" in batch:
                 wandb_images["hr_gt"] = batch["hr"]
             _log_wandb_inference(wandb_run, args.mode, metrics, wandb_images)
-        elif args.mode == "spectral_sedit_sr":
+        elif args.mode == "spectral_sdedit_sr":
             x_lr = batch["lr"] if "lr" in batch else batch.get("lr_up", batch["image"])
-            x_lr_up = F.interpolate(x_lr, size=(int(cfg.image_size), int(cfg.image_size)), mode="nearest")
-            x_hr, z_init, sedit_stats = spectral_sedit_sr(
+            sdedit_cfg = cfg.get("spectral_sdedit", cfg.sampling.get("spectral_sdedit", {}))
+            x_lr_up = F.interpolate(x_lr, size=(int(cfg.image_size), int(cfg.image_size)), mode=sdedit_cfg.get("upsample_mode", "nearest"))
+            x_hr, z_init, sdedit_stats = spectral_sdedit_sr(
                 x_lr=x_lr,
                 batch=batch,
                 model=denoiser,
@@ -216,23 +214,15 @@ def main():
             save_images(x_lr_up, out_dir, "lr_up")
             if "hr" in batch:
                 save_images(batch["hr"], out_dir, "hr_gt")
-            save_images(x_hr, out_dir, "spectral_sedit_sr")
+            save_images(x_hr, out_dir, "spectral_sdedit_sr")
             torch.save(z_init.detach().cpu(), out_dir / "terminal_state.pt")
-            torch.save(
-                {
-                    "x_lr_up": _rapsd_payload(x_lr_up),
-                    "z_init": _rapsd_payload(z_init),
-                    "x_sr": _rapsd_payload(x_hr),
-                },
-                out_dir / "spectra.pt",
-            )
             metrics = image_metrics(
                 x_hr,
                 batch,
                 lr_size=int(cfg.lr_size),
                 downsample_mode=cfg.get("measurement", {}).get("downsample_mode", "nearest"),
             )
-            metrics.update(sedit_stats)
+            metrics.update(sdedit_stats)
             metrics = scalarize_metrics(metrics)
             save_metrics(metrics, out_dir)
             wandb_images = {"lr_up": x_lr_up, "output": x_hr}

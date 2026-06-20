@@ -1,15 +1,15 @@
 space: pixel
 seed: 42
 image_size: 128
-scale: 2
-lr_size: 64
+scale: 16
+lr_size: 8
 
 data:
   name: nlm
   root: /projects/compures/datasets/NLM/crops
-  split_dir: data/nlm/splits/semi_biased/single/seed_2026 # PARASITIZED = 80% / UNINFECTED = 20%
+  split_dir: /projects/compures/nicolas/signal_sr/data/nlm/splits/semi_biased/single/seed_2026 # PARASITIZED = 80% / UNINFECTED = 20%
   image_size: 128
-  scale: 2
+  scale: 8
   channels: 3
   split_strategy: train_hr_val_test_lr
   return_pair: false

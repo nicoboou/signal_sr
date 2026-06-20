@@ -12,22 +12,37 @@ paths:
   output_root: ${SCRATCH}/signal_sr/runs/sr/nlm_pixel_hr_linear_uncond
 
 runtime:
-  # Adjust if your virtualenv lives elsewhere on Jean Zay.
-  python: ${WORK}/signal_sr/.venv/bin/python
+  # Optional: set venv_path if you want a specific Jean Zay virtualenv.
+  # If omitted, no virtualenv is activated; executables are resolved from the job PATH.
+  venv_path: null
+  launcher: auto
 
 slurm:
   account: wbg@a100
   partition: gpu_p5
   constraint: a100
-  qos: qos_gpu_a100-t4
-  time_min: 3000
+  qos: qos_gpu_a100-dev
+  time_min: 100
   nodes: 1
   tasks_per_node: 1
-  gpus: 4
-  gres: gpu:4
-  # This launcher starts one local Accelerate command; reserve 10 CPU/GPU on V100 quad nodes.
+  gpus: 2
+  gres: null
+  # The launcher requests gpus_per_node through submitit; reserve 10 CPU/GPU on this job.
   cpus_per_task: 40
   hint: nomultithread
+
+  # account: wbg@h100
+  # partition: gpu_p6
+  # constraint: h100
+  # qos: qos_gpu_h100-t4
+  # time_min: 4000
+  # nodes: 1
+  # tasks_per_node: 1
+  # gpus: 4
+  # gres: null
+  # # The launcher requests gpus_per_node through submitit; reserve 10 CPU/GPU on this job.
+  # cpus_per_task: 40
+  # hint: nomultithread
 
 data:
   root: ${SCRATCH}/NLM/crops
