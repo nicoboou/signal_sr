@@ -198,7 +198,7 @@ def binary_metrics(y_true, positive_probability, threshold=0.5):
     }
 
 
-def train_and_eval_level(level, config, classifier_seed=None, fold=None):
+def train_and_eval_level(level, config, classifier_seed=None, fold=None, checkpoint_path=None):
     classifier_seed = int(config.get("seed", 0) if classifier_seed is None else classifier_seed)
     seed_everything(classifier_seed)
 
@@ -267,6 +267,16 @@ def train_and_eval_level(level, config, classifier_seed=None, fold=None):
         test_metrics = binary_metrics(test_labels, test_prob, threshold=threshold)
         out.update(test_metrics)
         out.update({"n_train": len(train_loader.dataset), "n_val": len(val_loader.dataset), "n_test": len(test_loader.dataset)})
+    if checkpoint_path is not None:
+        metadata = {
+            "degradation_type": config["degradation"]["type"],
+            "level": float(level),
+            "seed": int(classifier_seed),
+            "fold": None if fold is None else int(fold),
+            "threshold": threshold,
+            "image_size": int(config.get("data", {}).get("image_size", 128)),
+        }
+        out["classifier_checkpoint"] = str(classifier.save_checkpoint(checkpoint_path, metadata=metadata))
     return out
 
 
@@ -340,6 +350,10 @@ def _safe_wandb_artifact_name(value):
     return (safe.strip("_") or "prehoc-results")[:120]
 
 
+def safe_level_tag(level):
+    return str(float(level)).replace("-", "m").replace(".", "p")
+
+
 def log_wandb_outputs(config, output_dir, results, summary):
     wandb_cfg = config.get("wandb", {}) or {}
     if not wandb_cfg.get("enabled", False):
@@ -402,12 +416,18 @@ def run(config, config_path=None):
     rows = []
     folds = cv_folds(config)
     seeds = training_seeds(config)
+    save_checkpoints = bool(config.get("train", {}).get("save_checkpoints", True))
+    checkpoint_dir = output_dir / "classifiers"
     for fold in folds:
         for classifier_seed in seeds:
             for level in config["degradation"]["levels"]:
                 fold_text = f" fold={fold}" if fold is not None else ""
                 print(f"Training/evaluating {config['degradation']['type']} level={level} seed={classifier_seed}{fold_text}")
-                metrics = train_and_eval_level(level, config, classifier_seed=classifier_seed, fold=fold)
+                fold_tag = f"_fold{int(fold)}" if fold is not None else ""
+                checkpoint_path = None
+                if save_checkpoints:
+                    checkpoint_path = checkpoint_dir / f"{config['degradation']['type']}_level{safe_level_tag(level)}_seed{int(classifier_seed)}{fold_tag}.pt"
+                metrics = train_and_eval_level(level, config, classifier_seed=classifier_seed, fold=fold, checkpoint_path=checkpoint_path)
                 row = {"degradation_type": config["degradation"]["type"], "level": float(level), "seed": int(classifier_seed), **metrics}
                 if fold is not None:
                     row["fold"] = int(fold)

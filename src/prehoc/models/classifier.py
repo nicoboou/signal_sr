@@ -1,6 +1,7 @@
 """Small image and feature classifiers with train/eval methods."""
 
 from copy import deepcopy
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -61,6 +62,41 @@ class ClassifierImage:
 
     def _new_optimizer(self):
         return torch.optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+
+    def _model_config(self):
+        return {
+            "device": str(self.device),
+            "epochs": self.epochs,
+            "batch_size": self.batch_size,
+            "lr": self.lr,
+            "weight_decay": self.weight_decay,
+            "width": self.width,
+            "backbone": self.backbone,
+            "pretrained": False,
+            "in_channels": self.in_channels,
+        }
+
+    def save_checkpoint(self, path, metadata=None):
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"state_dict": self.model.state_dict(), "model": self._model_config(), "metadata": metadata or {}}, path)
+        return path
+
+    @classmethod
+    def from_checkpoint(cls, path, device=None):
+        try:
+            payload = torch.load(path, map_location=device or "cpu", weights_only=True)
+        except TypeError:
+            payload = torch.load(path, map_location=device or "cpu")
+        model_cfg = dict(payload["model"])
+        model_cfg["pretrained"] = False
+        if device is not None:
+            model_cfg["device"] = device
+        classifier = cls(**model_cfg)
+        classifier.model.load_state_dict(payload["state_dict"])
+        classifier.model.eval()
+        classifier.checkpoint_metadata = payload.get("metadata", {})
+        return classifier
 
     def _loader(self, images, labels, indices, shuffle=False):
         x = self._tensor(images[indices])

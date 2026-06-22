@@ -98,7 +98,7 @@ class NLMSRDataset(Dataset):
         return len(self.table)
 
     def _path_from_row(self, row):
-        path = Path(row["crop_path"] if "crop_path" in row and pd.notna(row["crop_path"]) else row["relative_path"])
+        path = Path(row["relative_path"] if "relative_path" in row and pd.notna(row["relative_path"]) else row["crop_path"])
         return path if path.is_absolute() else self.root / path
 
     def __getitem__(self, idx):

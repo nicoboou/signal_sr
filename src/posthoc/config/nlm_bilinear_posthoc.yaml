@@ -1,0 +1,33 @@
+seed: 42
+device: cuda
+output_dir: runs/posthoc/nlm_bilinear
+run_id: null
+
+sr:
+  config: src/sr/configs/train/nlm_pixel_hr_linear_uncond.yaml
+  checkpoint: /path/to/sr/checkpoint-final
+  method: dps
+  split: test
+  batch_size: 4
+
+classifier:
+  checkpoint: /path/to/prehoc/run/classifiers/bilinear_level1p0_seed0.pt
+  threshold: 0.5
+
+data:
+  mask_outputs_root: /projects/compures/nicolas/cell_annotator/outputs
+  num_workers: 0
+
+degradation:
+  type: bilinear
+  levels: [1, 2, 4, 6, 8, 16, 32, 64]
+  batch_size: 128
+  downsample_mode: area
+  upsample_mode: nearest
+
+detector:
+  config: {}
+
+eval:
+  max_samples: null
+  save_images: true

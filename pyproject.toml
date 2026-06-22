@@ -39,7 +39,7 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["sr*", "prehoc*"]
+include = ["sr*", "prehoc*", "posthoc*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

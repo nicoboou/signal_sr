@@ -1,15 +1,15 @@
 # Jean Zay launch config for scripts/submit_jeanzay.py.
 # Submit with:
-#   python scripts/submit_jeanzay.py sr --jz-config src/sr/configs/train/nlm_pixel_hr_linear_uncond_jz.yaml
+#   python scripts/submit_jeanzay.py sr --jz-config src/sr/configs/train/nlm_pixel_hr_linear_eps_jz.yaml
 pipeline: sr
-base_config: src/sr/configs/train/nlm_pixel_hr_linear_uncond.yaml
+base_config: src/sr/configs/train/nlm_pixel_hr_linear_eps.yaml
 
 job:
-  name: sr_nlm_pixel_hr_linear_uncond
+  name: sr_nlm_pixel_hr_linear_eps
 
 paths:
-  scratch_root: ${SCRATCH}/signal_sr
-  output_root: ${SCRATCH}/signal_sr/runs/sr/nlm_pixel_hr_linear_uncond
+  scratch_root: ${WORK}/signal_sr_experiments
+  output_root: ${WORK}/signal_sr_experiments/sr/nlm_pixel_hr_linear_eps
 
 runtime:
   # Jean Zay virtualenv created with uv from the CPython install below.

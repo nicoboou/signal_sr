@@ -1,0 +1,36 @@
+seed: 42
+device: cuda
+output_dir: runs/posthoc/synthetic_bilinear
+run_id: null
+
+sr:
+  config: src/sr/configs/infer/synthetic_pixel_linear_dps.yaml
+  checkpoint: /path/to/sr/checkpoint-final
+  method: dps
+  split: test
+  batch_size: 8
+
+classifier:
+  checkpoint: /path/to/prehoc/run/classifiers/bilinear_level1p0_seed0.pt
+  threshold: 0.5
+
+data:
+  num_workers: 0
+
+degradation:
+  type: bilinear
+  levels: [1, 2, 4, 8, 16]
+  batch_size: 128
+  downsample_mode: area
+  upsample_mode: nearest
+
+detector:
+  config:
+    synthetic_cell_threshold: 0.12
+    synthetic_dark_threshold: 0.35
+    synthetic_min_area: 8
+    synthetic_max_area: 220
+
+eval:
+  max_samples: null
+  save_images: true
