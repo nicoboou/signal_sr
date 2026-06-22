@@ -1,1 +1,1 @@
-rsync -azvrh . --exclude 'runs/' --exclude 'outputs/' --exclude '.git' --exclude '.venv/' jeanzay:/lustre/fswork/projects/rech/gow/utd56zv/signal_sr
+rsync -azvrh . --exclude 'runs/' --exclude 'outputs/' --exclude '.git' --exclude '.venv/' --exclude '.archive/' jeanzay:/lustre/fswork/projects/rech/gow/utd56zv/signal_sr
