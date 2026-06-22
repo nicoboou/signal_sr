@@ -8,7 +8,6 @@ from pathlib import Path
 os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
 
 import torch
-import torch.nn.functional as F
 
 from .data import build_dataloader
 from .diagnostics import image_metrics, latent_metrics, scalarize_metrics
@@ -121,7 +120,9 @@ def main():
             raise ValueError("spectral_sdedit_sr requires objective.name=diffusion")
         if cfg.noise_scheduler.name == "spectral_rapsd":
             raise ValueError("spectral_sdedit_sr must use the trained HR diffusion scheduler, not spectral_rapsd")
-        sdedit_cfg = cfg.get("spectral_sdedit", cfg.sampling.get("spectral_sdedit", {}))
+        sdedit_cfg = cfg.get("spectral_native_lr_sdedit", cfg.sampling.get("spectral_native_lr_sdedit", {})) or cfg.get(
+            "spectral_sdedit", cfg.sampling.get("spectral_sdedit", {})
+        )
         if args.num_samples > 1 and not sdedit_cfg.get("allow_batch_size_gt_1", False):
             raise ValueError("spectral_sdedit_sr supports --num-samples 1 unless spectral_sdedit.allow_batch_size_gt_1=true")
     seed_everything(int(cfg.get("seed", 0)))
@@ -199,9 +200,13 @@ def main():
                 wandb_images["hr_gt"] = batch["hr"]
             _log_wandb_inference(wandb_run, args.mode, metrics, wandb_images)
         elif args.mode == "spectral_sdedit_sr":
-            x_lr = batch["lr"] if "lr" in batch else batch.get("lr_up", batch["image"])
-            sdedit_cfg = cfg.get("spectral_sdedit", cfg.sampling.get("spectral_sdedit", {}))
-            x_lr_up = F.interpolate(x_lr, size=(int(cfg.image_size), int(cfg.image_size)), mode=sdedit_cfg.get("upsample_mode", "nearest"))
+            native_cfg = cfg.get("spectral_native_lr_sdedit", cfg.sampling.get("spectral_native_lr_sdedit", {}))
+            if native_cfg.get("enabled", False):
+                if "lr" not in batch:
+                    raise ValueError("Native LR spectral SDEdit requires batches with a native 'lr' tensor; LR-up is not a valid source")
+                x_lr = batch["lr"]
+            else:
+                x_lr = batch["lr"] if "lr" in batch else batch.get("lr_up", batch["image"])
             x_hr, z_init, sdedit_stats = spectral_sdedit_sr(
                 x_lr=x_lr,
                 batch=batch,
@@ -211,11 +216,20 @@ def main():
                 scale_r=cfg.get("scale", int(cfg.image_size) // int(cfg.lr_size)),
                 cfg=cfg,
             )
-            save_images(x_lr_up, out_dir, "lr_up")
+            save_images(x_lr, out_dir, "lr_native")
+            if "lr_up" in batch:
+                save_images(batch["lr_up"], out_dir, "lr_up_reference")
             if "hr" in batch:
                 save_images(batch["hr"], out_dir, "hr_gt")
+            if torch.is_tensor(sdedit_stats.get("x_proxy")):
+                save_images(sdedit_stats["x_proxy"], out_dir, "x_proxy")
             save_images(x_hr, out_dir, "spectral_sdedit_sr")
             torch.save(z_init.detach().cpu(), out_dir / "terminal_state.pt")
+            if native_cfg.get("save_debug", False):
+                torch.save(
+                    {key: (value.detach().cpu() if torch.is_tensor(value) else value) for key, value in sdedit_stats.items()},
+                    out_dir / "native_lr_spectral_sdedit_debug.pt",
+                )
             metrics = image_metrics(
                 x_hr,
                 batch,
@@ -225,7 +239,9 @@ def main():
             metrics.update(sdedit_stats)
             metrics = scalarize_metrics(metrics)
             save_metrics(metrics, out_dir)
-            wandb_images = {"lr_up": x_lr_up, "output": x_hr}
+            wandb_images = {"lr_native": x_lr, "output": x_hr}
+            if torch.is_tensor(sdedit_stats.get("x_proxy")):
+                wandb_images["x_proxy"] = sdedit_stats["x_proxy"]
             if "hr" in batch:
                 wandb_images["hr_gt"] = batch["hr"]
             _log_wandb_inference(wandb_run, args.mode, metrics, wandb_images)

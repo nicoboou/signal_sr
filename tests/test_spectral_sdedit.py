@@ -7,12 +7,19 @@ from sr.inference.spectral_sdedit import spectral_sdedit_init
 from sr.schedules.spectral import (
     dct2,
     dct_rapsd_from_coefficients,
+    estimate_effective_bandwidth,
+    estimate_hr_spectral_stats,
     find_t_star_logfreq_budget,
     fit_power_law,
+    hard_embed_native_lr_dct,
     idct2,
     log_frequency_bin_average,
+    make_dct_frequency_grid,
     make_frequency_radius_grid,
     make_reliability_mask,
+    native_lr_dct_proxy,
+    native_lr_spectral_sdedit_init,
+    select_t_star_by_spectral_activation,
     spectral_reliability,
 )
 
@@ -70,6 +77,19 @@ def test_dct_idct_roundtrip():
     x = torch.randn(2, 3, 8, 10)
     x_rec = idct2(dct2(x))
     assert torch.mean((x - x_rec).abs()) < 1e-5
+
+
+def test_dct_roundtrip():
+    torch.manual_seed(10)
+    x = torch.randn(1, 2, 7, 9)
+    assert torch.allclose(idct2(dct2(x, norm="ortho"), norm="ortho"), x, atol=1e-5)
+
+
+def test_dct_frequency_grid_convention():
+    k = make_dct_frequency_grid(8, 10, device="cpu", dtype=torch.float32)
+    assert torch.isclose(k[0, 1], torch.tensor(0.5))
+    assert torch.isclose(k[1, 0], torch.tensor(0.5))
+    assert torch.isclose(k[0, 0], torch.tensor(0.5))
 
 
 def test_spectral_reliability_bounds():
@@ -225,3 +245,78 @@ def test_legacy_frequency_dependent_init_is_opt_in():
     assert "legacy_noise_scale_high_mean" in stats
     assert torch.allclose(z_init, expected, atol=1e-5)
     assert bool(torch.isfinite(z_init).all())
+
+
+def _native_stats(H=32, W=32, num_log_bins=16):
+    torch.manual_seed(123)
+    hr = torch.randn(4, 1, H, W)
+    return estimate_hr_spectral_stats([{"hr": hr}], (H, W), num_log_bins=num_log_bins)
+
+
+def test_constant_image_embedding():
+    y_lr = torch.full((1, 1, 8, 8), 0.37)
+    x_proxy, X_emb, Y = native_lr_dct_proxy(y_lr, (32, 32))
+    assert X_emb.shape == (1, 1, 32, 32)
+    assert Y.shape == (1, 1, 8, 8)
+    assert torch.allclose(x_proxy, torch.full_like(x_proxy, 0.37), atol=1e-5)
+
+
+def test_hard_embedding_shape():
+    y_lr = torch.randn(1, 2, 8, 10)
+    X_emb, Y = hard_embed_native_lr_dct(y_lr, (24, 28))
+    assert X_emb.shape == (1, 2, 24, 28)
+    assert Y.shape == (1, 2, 8, 10)
+    assert torch.count_nonzero(X_emb[:, :, 8:, :]) == 0
+    assert torch.count_nonzero(X_emb[:, :, :, 10:]) == 0
+
+
+def test_q_bins_bounds():
+    hr_stats = _native_stats()
+    y_lr = torch.randn(1, 1, 8, 8)
+    X_emb, _ = hard_embed_native_lr_dct(y_lr, (32, 32))
+    _, debug = estimate_effective_bandwidth(X_emb, hr_stats, h=8, w=8, H=32, W=32)
+    q_bins = debug["q_bins"]
+    assert torch.all(q_bins >= 0)
+    assert torch.all(q_bins <= 1)
+
+
+def test_K_eff_bounds():
+    hr_stats = _native_stats()
+    y_lr = torch.randn(1, 1, 8, 8)
+    X_emb, _ = hard_embed_native_lr_dct(y_lr, (32, 32))
+    K_eff, _ = estimate_effective_bandwidth(X_emb, hr_stats, h=8, w=8, H=32, W=32)
+    assert torch.all(K_eff > 0)
+    assert torch.all(K_eff <= float(hr_stats["K_hr"]))
+
+
+def test_lambda_star_finite():
+    scheduler = ToyScheduler()
+    scheduler.set_timesteps(10)
+    hr_stats = _native_stats()
+    K_eff = torch.tensor([4.0])
+    _, debug = select_t_star_by_spectral_activation(scheduler, hr_stats, K_eff)
+    assert torch.isfinite(debug["lambda_star"]).all()
+
+
+def test_t_star_valid():
+    scheduler = ToyScheduler()
+    scheduler.set_timesteps(10)
+    hr_stats = _native_stats()
+    K_eff = torch.tensor([4.0])
+    t_star, _ = select_t_star_by_spectral_activation(scheduler, hr_stats, K_eff)
+    assert bool(torch.isin(t_star, scheduler.timesteps).all())
+
+
+def test_z_init_scheduler_variance_shape():
+    torch.manual_seed(321)
+    scheduler = ToyScheduler()
+    scheduler.set_timesteps(10)
+    hr_stats = _native_stats()
+    y_lr = torch.randn(1, 1, 8, 8)
+    z_init, t_star, debug = native_lr_spectral_sdedit_init(y_lr, scheduler, hr_stats, (32, 32))
+    assert z_init.shape == (1, 1, 32, 32)
+    assert debug["z_init"].shape == (1, 1, 32, 32)
+    assert debug["x_proxy"].shape == (1, 1, 32, 32)
+    assert debug["alpha_star"].shape == (1,)
+    assert debug["sigma_star"].shape == (1,)
+    assert bool(torch.isin(t_star, scheduler.timesteps).all())

@@ -72,7 +72,7 @@ sampling:
   method: ddim
 
 spectral_sdedit:
-  enabled: true
+  enabled: false
   mode: logfreq_budget
   rho: 0.75
   m_min: 0.0
@@ -82,6 +82,18 @@ spectral_sdedit:
   upsample_mode: nearest
   init_formula: scheduler_compatible
   allow_batch_size_gt_1: false
+
+spectral_native_lr_sdedit:
+  enabled: true
+  transform: dct
+  hard_embedding: true
+  use_lr_up: false
+  hr_stats_path: null
+  num_log_bins: 64
+  activation_snr: 1.0
+  use_power_law_hr: true
+  allow_batch_size_gt_1: false
+  save_debug: true
 
 measurement:
   space: lr_up
