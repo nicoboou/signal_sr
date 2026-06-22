@@ -35,6 +35,7 @@ class PythonEnvironment:
     python_executable: str
     env_updates: dict[str, str]
     venv_path: str | None
+    uv_python_dir: str | None = None
 
 
 @dataclass
@@ -77,6 +78,58 @@ def as_list(value) -> list[str]:
     return [str(value)]
 
 
+def resolve_uv_python(uv_python_dir: str) -> Path:
+    python_root = Path(os.path.expandvars(uv_python_dir)).expanduser().resolve()
+    python_bin = python_root / "bin" if (python_root / "bin").is_dir() else python_root
+    for executable_name in ("python3.10", "python3", "python"):
+        candidate = python_bin / executable_name
+        if candidate.exists():
+            return candidate.resolve()
+    raise FileNotFoundError(f"Requested uv Python directory does not contain a Python executable: {python_root}")
+
+
+def repair_uv_venv(venv_path: Path, uv_python_dir: str) -> None:
+    base_python = resolve_uv_python(uv_python_dir)
+    venv_bin = venv_path / "bin"
+    if not venv_bin.is_dir():
+        raise FileNotFoundError(f"Requested virtualenv does not contain a bin directory: {venv_bin}")
+
+    python_link = venv_bin / "python"
+    if python_link.is_symlink() and python_link.resolve() != base_python:
+        python_link.unlink()
+        python_link.symlink_to(base_python)
+    elif not python_link.exists():
+        python_link.symlink_to(base_python)
+    for executable_name in ("python3", "python3.10"):
+        executable_path = venv_bin / executable_name
+        if executable_path.is_symlink():
+            if os.readlink(executable_path) == "python":
+                continue
+            executable_path.unlink()
+            executable_path.symlink_to("python")
+        elif not executable_path.exists():
+            executable_path.symlink_to("python")
+
+    pyvenv_cfg = venv_path / "pyvenv.cfg"
+    if not pyvenv_cfg.exists():
+        return
+    desired_home = str(base_python.parent)
+    desired_executable = str(base_python)
+    changed = False
+    lines = []
+    for line in pyvenv_cfg.read_text(encoding="utf-8").splitlines():
+        if line.startswith("home = ") and line != f"home = {desired_home}":
+            lines.append(f"home = {desired_home}")
+            changed = True
+        elif line.startswith("executable = ") and line != f"executable = {desired_executable}":
+            lines.append(f"executable = {desired_executable}")
+            changed = True
+        else:
+            lines.append(line)
+    if changed:
+        pyvenv_cfg.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def resolve_python_environment(args: argparse.Namespace) -> PythonEnvironment:
     env_updates: dict[str, str] = {}
 
@@ -86,17 +139,22 @@ def resolve_python_environment(args: argparse.Namespace) -> PythonEnvironment:
             python_path = Path(python_value).expanduser()
             if not python_path.exists():
                 raise FileNotFoundError(f"Requested Python executable does not exist: {python_path}")
-            return PythonEnvironment(str(python_path.resolve()), env_updates, None)
-        return PythonEnvironment(python_value, env_updates, None)
+            return PythonEnvironment(str(python_path.resolve()), env_updates, None, args.uv_python_dir)
+        return PythonEnvironment(python_value, env_updates, None, args.uv_python_dir)
 
     if args.venv_path:
         venv_path = Path(os.path.expandvars(args.venv_path)).expanduser().resolve()
+        if args.uv_python_dir:
+            repair_uv_venv(venv_path, args.uv_python_dir)
         python_path = venv_path / "bin" / "python"
         if not python_path.exists():
             raise FileNotFoundError(f"Requested virtualenv does not contain a Python executable: {python_path}")
         env_updates["VIRTUAL_ENV"] = str(venv_path)
         env_updates["PATH"] = prepend_path(str(venv_path / "bin"), os.environ.get("PATH"))
-        return PythonEnvironment(str(python_path), env_updates, str(venv_path))
+        return PythonEnvironment(str(python_path), env_updates, str(venv_path), args.uv_python_dir)
+
+    if args.uv_python_dir:
+        return PythonEnvironment(str(resolve_uv_python(args.uv_python_dir)), env_updates, None, args.uv_python_dir)
 
     return PythonEnvironment("python", env_updates, None)
 
@@ -208,6 +266,7 @@ def apply_jz_config(args: argparse.Namespace) -> argparse.Namespace:
     args.output_root = args.output_root or paths_cfg.get("output_root")
     args.python = args.python or runtime_cfg.get("python")
     args.venv_path = args.venv_path or runtime_cfg.get("venv_path")
+    args.uv_python_dir = args.uv_python_dir or runtime_cfg.get("uv_python_dir")
     args.module_load = [*as_list(runtime_cfg.get("module_load")), *as_list(args.module_load)]
     args.module_purge = bool(args.module_purge or runtime_cfg.get("module_purge", False))
     args.data_root = args.data_root or data_cfg.get("root")
@@ -454,7 +513,7 @@ def build_command(
     raise SystemExit(f"Unsupported SR launcher: {args.launcher}")
 
 
-def create_bundle(args: argparse.Namespace) -> tuple[Path, list[str], dict[str, str], str]:
+def create_bundle(args: argparse.Namespace) -> tuple[Path, list[str], dict[str, str], str, str]:
     scratch_root = default_scratch_root(args.scratch_root)
     config_source = repo_path(args.config).resolve()
     if not config_source.is_file():
@@ -471,6 +530,7 @@ def create_bundle(args: argparse.Namespace) -> tuple[Path, list[str], dict[str, 
     python_env = resolve_python_environment(args)
     args.python = python_env.python_executable
     args.venv_path = python_env.venv_path or args.venv_path
+    args.uv_python_dir = python_env.uv_python_dir or args.uv_python_dir
 
     cfg = patch_common_config(load_yaml(config_source), args, job_id, output_base)
     bundled_config = bundle_dir / "config.yaml"
@@ -488,21 +548,22 @@ def create_bundle(args: argparse.Namespace) -> tuple[Path, list[str], dict[str, 
     dump_text(bundle_dir / "git_diff.patch", git_output("diff"))
     dump_text(bundle_dir / "git_diff_staged.patch", git_output("diff", "--staged"))
     dump_text(bundle_dir / "warnings.txt", "\n".join(warnings) + ("\n" if warnings else ""))
+    dump_text(bundle_dir / "submitit_python.txt", f"{python_env.python_executable}\n")
     dump_text(bundle_dir / "wandb_sync.txt", f"wandb sync {env['WANDB_DIR']}/offline-run-*\n")
     with (bundle_dir / "submit_args.json").open("w", encoding="utf-8") as handle:
         json.dump(jsonable_args(args), handle, indent=2)
     with (bundle_dir / "env.json").open("w", encoding="utf-8") as handle:
         json.dump(env, handle, indent=2)
 
-    return bundle_dir, command, env, job_id
+    return bundle_dir, command, env, job_id, python_env.python_executable
 
 
-def submit_job(args: argparse.Namespace, bundle_dir: Path, command: list[str], env: dict[str, str], job_id: str) -> None:
+def submit_job(args: argparse.Namespace, bundle_dir: Path, command: list[str], env: dict[str, str], job_id: str, submitit_python: str) -> None:
     import submitit
 
     log_dir = default_scratch_root(args.scratch_root) / "slurm_logs" / job_id
     log_dir.mkdir(parents=True, exist_ok=True)
-    executor = submitit.AutoExecutor(folder=str(log_dir))
+    executor = submitit.AutoExecutor(folder=str(log_dir), slurm_python=shlex.quote(submitit_python))
     params = {
         "name": job_id,
         "timeout_min": int(args.time_min),
@@ -544,6 +605,11 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--job-name", default=None)
     parser.add_argument("--python", default=None)
     parser.add_argument("--venv-path", default=None, help="Virtualenv to use inside the job. Not used unless explicitly provided.")
+    parser.add_argument(
+        "--uv-python-dir",
+        default=None,
+        help="uv-managed CPython install used by the virtualenv, e.g. /lustre/.../uv-python/cpython-3.10.16-linux-x86_64-gnu.",
+    )
     parser.add_argument("--module-load", action="append", default=[], help="Module to load before launching the job command. Repeatable.")
     parser.add_argument("--module-purge", action="store_true", help="Run 'module purge' before --module-load entries.")
     parser.add_argument("--data-root", default=None)
@@ -590,7 +656,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = normalize_args(parse_args())
-    bundle_dir, command, env, job_id = create_bundle(args)
+    bundle_dir, command, env, job_id, submitit_python = create_bundle(args)
     print(f"Bundle: {bundle_dir}")
     print(f"Command: {shlex.join(command)}")
     warnings = (bundle_dir / "warnings.txt").read_text(encoding="utf-8").strip()
@@ -600,7 +666,7 @@ def main() -> None:
         print("Dry run: no SLURM job submitted.")
         print(f"Sync later from frontal node: wandb sync {env['WANDB_DIR']}/offline-run-*")
         return
-    submit_job(args, bundle_dir, command, env, job_id)
+    submit_job(args, bundle_dir, command, env, job_id, submitit_python)
 
 
 if __name__ == "__main__":
