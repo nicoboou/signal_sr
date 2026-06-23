@@ -17,6 +17,7 @@ from .schedules import build_noise_scheduler
 from .schedules.spectral import load_hr_spectral_stats
 from .utils.checkpoints import load_model_weights
 from .utils.config import merge_dict, load_config, to_plain
+from .utils.outputs import DEFAULT_OUTPUT_ROOT, make_run_output_dir, resolve_path
 from .utils.seed import seed_everything
 
 
@@ -73,6 +74,10 @@ def _resolve_n_samples(value: str, dataset_len: int | None) -> int:
     if n_samples <= 0:
         raise ValueError("--n-samples must be positive")
     return min(n_samples, int(dataset_len)) if dataset_len is not None else n_samples
+
+
+def default_fid_output_base(config_path, method):
+    return DEFAULT_OUTPUT_ROOT / f"fid_{Path(config_path).stem}_{method}"
 
 
 def _loader_len(loader) -> int | None:
@@ -255,8 +260,10 @@ def main():
 
     device = torch.device(args.device)
     fid_device = torch.device(args.fid_device)
-    output_dir = Path(args.output_dir or f"outputs/fid/{Path(args.config).stem}/{args.method}")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    base_output_dir = resolve_path(args.output_dir) if args.output_dir else default_fid_output_base(args.config, args.method)
+    output_dir, run_id = make_run_output_dir(base_output_dir)
+    print(f"Run ID: {run_id}")
+    print(f"Output directory: {output_dir}")
 
     real_cfg = merge_dict(cfg.data, cfg.get(f"{args.split}_data", {}))
     real_cfg.return_pair = True
@@ -315,6 +322,9 @@ def main():
         "real_feature_cache_hit": bool(details["real_feature_cache_hit"]),
         "config": str(args.config),
         "checkpoint": str(args.checkpoint),
+        "base_output_dir": str(base_output_dir),
+        "output_dir": str(output_dir),
+        "run_id": str(run_id),
         "split": args.split,
         "seed": int(args.seed),
         "generation_batch_size": int(args.generation_batch_size),

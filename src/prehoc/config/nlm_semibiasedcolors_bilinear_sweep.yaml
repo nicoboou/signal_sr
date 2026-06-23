@@ -1,13 +1,12 @@
-
 seed: 42
 seeds: [0, 1, 2] # Classifier/training seeds. The data split directory is fixed.
-device: cuda:1
-output_dir: /projects/compures/nicolas/signal_sr/src/prehoc/outputs/nlm_fullbiased_bilinear_sweep
+device: cuda:2
+output_dir: /projects/compures/nicolas/signal_sr/src/prehoc/outputs/nlm_semibiasedcolors_bilinear_sweep
 run_id: null
 
 data:
   root: /projects/compures/datasets/NLM/crops
-  split_dir: data/nlm/splits/biased/kfolds/seed_42
+  split_dir: data/nlm/splits/semi_biased_colors/kfolds/seed_2026
   # Expects train_fold_1.csv, val_fold_1.csv, ..., train_fold_K.csv, val_fold_K.csv.
   kfold:
     enabled: true

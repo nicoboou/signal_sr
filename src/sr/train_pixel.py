@@ -68,14 +68,6 @@ def validate_cfg(cfg):
             raise ValueError("EPS training requires objective.name=diffusion and prediction_type=sample")
 
 
-def _uses_concat_conditioning(cfg):
-    return denoiser_conditioning_mode(cfg.denoiser) == "concat"
-
-
-def _uses_eps(cfg):
-    return cfg.sampling.method == "eps"
-
-
 def _ddim_clip_denoised(cfg):
     ddim_cfg = cfg.sampling.get("ddim", {})
     if "clip_denoised" in ddim_cfg:
@@ -167,7 +159,7 @@ def _random_hr_batches(cfg, sampler, objective, noise_scheduler, device, n_sampl
     in_channels, channels = denoiser_channels(cfg.denoiser)
     concat_channels = in_channels - channels
     image_size = int(cfg.denoiser.params.sample_size)
-    concat_conditioning = _uses_concat_conditioning(cfg)
+    concat_conditioning = denoiser_conditioning_mode(cfg.denoiser) == "concat"
     rng = torch.Generator(device=device).manual_seed(int(rng_seed))
     emitted = 0
     clip_d = _ddim_clip_denoised(cfg)
@@ -175,12 +167,16 @@ def _random_hr_batches(cfg, sampler, objective, noise_scheduler, device, n_sampl
     while emitted < n_samples:
         current = min(int(batch_size), int(n_samples) - emitted)
         z_t = torch.randn(current, channels, image_size, image_size, generator=rng, device=device)
-        conditioning_image = torch.randn(current, concat_channels, image_size, image_size, generator=rng, device=device) if concat_conditioning else z_t
+        conditioning_image = (
+            torch.randn(current, concat_channels, image_size, image_size, generator=rng, device=device) if concat_conditioning else z_t
+        )
         if objective.name == "diffusion":
             x_out = sampler.ddim_loop(z_t, dummy_batch, "HR", conditioning_image=conditioning_image, clip_denoised=clip_d)
         else:
             flow_cfg = cfg.sampling.get("flow", cfg.inversion.get("flow", {}))
-            x_out = sampler.flow_loop(z_t, dummy_batch, "HR", conditioning_image=conditioning_image, direction="reverse", n_steps=int(flow_cfg.get("n_steps", 50)))
+            x_out = sampler.flow_loop(
+                z_t, dummy_batch, "HR", conditioning_image=conditioning_image, direction="reverse", n_steps=int(flow_cfg.get("n_steps", 50))
+            )
         emitted += current
         yield x_out
 
@@ -261,11 +257,13 @@ def run_random_hr_validation(
     in_channels, channels = denoiser_channels(cfg.denoiser)
     concat_channels = in_channels - channels
     image_size = int(cfg.denoiser.params.sample_size)
-    concat_conditioning = _uses_concat_conditioning(cfg)
+    concat_conditioning = denoiser_conditioning_mode(cfg.denoiser) == "concat"
     batch_size = 16
     rng = torch.Generator(device=device).manual_seed(FIXED_VAL_NOISE_SEED)
     z_t = torch.randn(batch_size, channels, image_size, image_size, generator=rng, device=device)
-    conditioning_image = torch.randn(batch_size, concat_channels, image_size, image_size, generator=rng, device=device) if concat_conditioning else z_t
+    conditioning_image = (
+        torch.randn(batch_size, concat_channels, image_size, image_size, generator=rng, device=device) if concat_conditioning else z_t
+    )
     dummy_batch = {"domain": None}
     sampler = Sampler(cfg.sampling, objective, noise_scheduler, denoiser, conditioner, global_cfg=cfg)
     clip_d = _ddim_clip_denoised(cfg)
@@ -516,8 +514,7 @@ def main():
         ensure_synthetic_split(cfg)
 
     accelerator = Accelerator(
-        mixed_precision=cfg.train.get("mixed_precision", "no"),
-        log_with="wandb" if cfg.get("wandb", {}).get("enabled", False) else None,
+        mixed_precision=cfg.train.get("mixed_precision", "no"), log_with="wandb" if cfg.get("wandb", {}).get("enabled", False) else None
     )
 
     base_output_dir = resolve_path(args.output_dir or cfg.train.get("output_dir", default_train_output_base(args.config)))
@@ -527,6 +524,7 @@ def main():
         output_info = [str(base_output_dir), str(output_dir), run_id]
         with (output_dir / "argv.json").open("w", encoding="utf-8") as handle:
             json.dump({"argv": sys.argv}, handle, indent=2)
+
     broadcast_object_list(output_info)
     base_output_dir = Path(output_info[0])
     output_dir = Path(output_info[1])
@@ -541,28 +539,22 @@ def main():
         else:
             accelerator.init_trackers(cfg.wandb.project, config=to_plain(cfg))
 
-    concat_conditioning = _uses_concat_conditioning(cfg)
+    # for SR3 paired training
+    concat_conditioning = denoiser_conditioning_mode(cfg.denoiser) == "concat"
     train_data_cfg = merge_dict(cfg.data, {})
     if concat_conditioning:
         train_data_cfg.return_pair = True
 
+    # Train loader
     batch_size = args.batch_size or int(cfg.train.batch_size)
-    loader = build_dataloader(
-        train_data_cfg,
-        split="train",
-        shuffle=True,
-        batch_size=batch_size,
-        num_workers=args.num_workers,
-    )
+    train_loader = build_dataloader(train_data_cfg, split="train", shuffle=True, batch_size=batch_size, num_workers=args.num_workers)
+
+    # Val loader
     val_cfg = merge_dict(cfg.data, cfg.get("val_data", {}))
     val_cfg.return_pair = True
-    val_loader = build_dataloader(
-        val_cfg,
-        split="val",
-        shuffle=False,
-        batch_size=min(4, batch_size),
-        num_workers=args.num_workers,
-    )
+    val_loader = build_dataloader(val_cfg, split="val", shuffle=False, batch_size=min(4, batch_size), num_workers=args.num_workers)
+
+    # Metrics loaders
     mind_loader = None
     if _metric_enabled(cfg, "mind"):
         mind_cfg = _metric_cfg(cfg, "mind")
@@ -595,7 +587,7 @@ def main():
 
     params = list(denoiser.parameters()) + list(conditioner.parameters())
     optimizer = torch.optim.AdamW(params, lr=float(cfg.train.lr))
-    denoiser, conditioner, optimizer, loader = accelerator.prepare(denoiser, conditioner, optimizer, loader)
+    denoiser, conditioner, optimizer, train_loader = accelerator.prepare(denoiser, conditioner, optimizer, train_loader)
 
     max_steps = int(args.max_steps or cfg.train.max_steps)
     log_every = int(cfg.train.get("log_every", 50))
@@ -608,16 +600,20 @@ def main():
     denoiser.train()
     conditioner.train()
     while step < max_steps:
-        for batch in loader:
-            if _uses_eps(cfg):
+        for batch in train_loader:
+            if cfg.sampling.method == "eps":
                 if "hr" not in batch:
                     raise ValueError("EPS training requires train_data_cfg.return_pair=true so batches contain hr")
                 x0 = batch["hr"]
                 conditioning_image = None
             else:
-                x0, conditioning_image = _training_tensors(batch, concat_conditioning)
+                if not concat_conditioning:
+                    x0, conditioning_image = batch["image"], None
+                if "hr" not in batch or "lr_up" not in batch:
+                    raise ValueError("Channel-concat conditioning requires batches with hr and lr_up tensors")
+                x0, conditioning_image = batch["hr"], batch["lr_up"]
             timesteps = torch.randint(0, noise_scheduler.num_train_timesteps, (x0.shape[0],), device=x0.device)
-            if _uses_eps(cfg):
+            if cfg.sampling.method == "eps":
                 noise = torch.randn_like(x0)
                 noisy_x = noise_scheduler.add_noise(x0, noise, timesteps, image=x0)
                 y_lr = eps_observation_from_hr(x0, cfg, noisy=True)
@@ -647,7 +643,7 @@ def main():
                     accelerator.print(f"step={step} loss={loss.detach().float().item():.6f}")
 
             if sample_every > 0 and step % sample_every == 0 and accelerator.is_main_process:
-                if cfg.data.get("split_strategy") == "train_hr_val_test_lr" and not _uses_eps(cfg):
+                if cfg.data.get("split_strategy") == "train_hr_val_test_lr" and not cfg.sampling.method == "eps":
                     val_logs = run_random_hr_validation(
                         cfg,
                         denoiser,

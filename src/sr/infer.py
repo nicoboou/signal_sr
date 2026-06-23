@@ -20,6 +20,7 @@ from .splits import ensure_synthetic_split
 from .utils.checkpoints import load_model_weights
 from .utils.config import load_config, merge_dict, to_plain
 from .utils.images import save_images, tensor_to_pil_image
+from .utils.outputs import DEFAULT_OUTPUT_ROOT, make_run_output_dir, resolve_path
 from .utils.seed import seed_everything
 
 
@@ -106,6 +107,10 @@ def _log_wandb_inference(run, mode, metrics, images_dict):
         run.log(payload, step=0)
 
 
+def default_infer_output_base(config_path, mode):
+    return DEFAULT_OUTPUT_ROOT / f"{Path(config_path).stem}_{mode}"
+
+
 def main():
     args = parse_args()
     cfg = load_config(args.config)
@@ -164,8 +169,10 @@ def main():
         freeze_for_inference(autoencoder)
 
     noise_scheduler.set_timesteps(cfg.noise_scheduler.n_infer_steps, device=device)
-    out_dir = Path(args.output_dir or f"outputs/{Path(args.config).stem}/{args.mode}")
-    out_dir.mkdir(parents=True, exist_ok=True)
+    base_out_dir = resolve_path(args.output_dir) if args.output_dir else default_infer_output_base(args.config, args.mode)
+    out_dir, run_id = make_run_output_dir(base_out_dir)
+    print(f"Run ID: {run_id}")
+    print(f"Output directory: {out_dir}")
     wandb_run = _init_wandb(cfg, args, out_dir)
 
     grad_context = torch.enable_grad() if cfg.sampling.method == "dps" else torch.no_grad()

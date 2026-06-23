@@ -60,7 +60,7 @@ sampling:
   method: dps
   dps:
     base_sampler: ddpm
-    guidance_scale: 5.0
+    guidance_scale: 12.0
     start_step: 0
     end_step: null
     clip_denoised: true

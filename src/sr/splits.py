@@ -4,7 +4,10 @@ from pathlib import Path
 
 import numpy as np
 
-from data.synthetic.synthetic import generate_synthetic_dataset, normalise_binary_values
+from sr.synthetic import (
+    generate_synthetic_dataset,
+    normalise_binary_values,
+)
 
 
 LABEL_COLUMNS = ["parasite", "filament", "strong_texture"]
@@ -26,7 +29,10 @@ def _factor_values_from_kwargs(generator_kwargs):
         "parasite": list(normalise_binary_values(generator_kwargs.get("parasite_values", (0, 1)), "parasite_values")),
         "filament": list(normalise_binary_values(generator_kwargs.get("filament_values", (0, 1)), "filament_values")),
         "strong_texture": list(
-            normalise_binary_values(generator_kwargs.get("strong_texture_values", (0, 1)), "strong_texture_values")
+            normalise_binary_values(
+                generator_kwargs.get("strong_texture_values", (0, 1)),
+                "strong_texture_values",
+            )
         ),
     }
 
@@ -115,7 +121,11 @@ def _stratified_split_indices(labels: np.ndarray, split_ratios, seed: int):
         train.extend(indices[:n_train].tolist())
         val.extend(indices[n_train : n_train + n_val].tolist())
         test.extend(indices[n_train + n_val :].tolist())
-    return np.asarray(train, dtype=np.int64), np.asarray(val, dtype=np.int64), np.asarray(test, dtype=np.int64)
+    return (
+        np.asarray(train, dtype=np.int64),
+        np.asarray(val, dtype=np.int64),
+        np.asarray(test, dtype=np.int64),
+    )
 
 
 def _assign_train_domains(train_idx: np.ndarray, labels: np.ndarray, seed: int):
@@ -144,14 +154,27 @@ def _save_split_arrays(out_dir, name, indices, domains, dataset):
     out_dir = Path(out_dir)
     np.save(out_dir / f"{name}_images.npy", dataset.images[indices].astype(np.float32))
     np.save(out_dir / f"{name}_domains.npy", domains.astype(np.int64))
-    np.save(out_dir / f"{name}_labels.npy", dataset.labels.iloc[indices][LABEL_COLUMNS].to_numpy(dtype=np.int64))
+    np.save(
+        out_dir / f"{name}_labels.npy",
+        dataset.labels.iloc[indices][LABEL_COLUMNS].to_numpy(dtype=np.int64),
+    )
     sample_ids = dataset.metadata.iloc[indices]["sample_id"].to_numpy(dtype=np.int64)
     np.save(out_dir / f"{name}_sample_ids.npy", sample_ids)
     np.save(out_dir / f"{name}_cell_masks.npy", dataset.cell_masks[indices].astype(bool))
-    np.save(out_dir / f"{name}_parasite_masks.npy", dataset.parasite_masks[indices].astype(bool))
-    np.save(out_dir / f"{name}_filament_masks.npy", dataset.filament_masks[indices].astype(bool))
+    np.save(
+        out_dir / f"{name}_parasite_masks.npy",
+        dataset.parasite_masks[indices].astype(bool),
+    )
+    np.save(
+        out_dir / f"{name}_filament_masks.npy",
+        dataset.filament_masks[indices].astype(bool),
+    )
     metadata_rows = dataset.metadata.iloc[indices].to_dict(orient="records")
-    np.save(out_dir / f"{name}_metadata.npy", np.asarray(metadata_rows, dtype=object), allow_pickle=True)
+    np.save(
+        out_dir / f"{name}_metadata.npy",
+        np.asarray(metadata_rows, dtype=object),
+        allow_pickle=True,
+    )
 
 
 def create_synthetic_split_npy(
@@ -228,11 +251,7 @@ def ensure_synthetic_split(cfg) -> None:
         "filament_masks",
         "metadata",
     )
-    required = [
-        split_dir / f"{name}_{suffix}.npy"
-        for name in ("train", "val", "test")
-        for suffix in required_suffixes
-    ]
+    required = [split_dir / f"{name}_{suffix}.npy" for name in ("train", "val", "test") for suffix in required_suffixes]
     gen = cfg.get("synthetic_generation", {})
     strategy = cfg.data.get("split_strategy", "hr_lr_50_50_then_tvt")
     split_ratios = cfg.data.get("split_ratios", (0.80, 0.05, 0.15))

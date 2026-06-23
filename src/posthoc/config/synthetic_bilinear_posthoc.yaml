@@ -1,6 +1,6 @@
 seed: 42
 device: cuda
-output_dir: runs/posthoc/synthetic_bilinear
+output_dir: posthoc/outputs/synthetic_bilinear
 run_id: null
 
 sr:

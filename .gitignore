@@ -16,6 +16,7 @@ checkpoints/
 *.md
 !docs/**/*.md
 *.png
+*.gif
 *.lock
 *.npz
 

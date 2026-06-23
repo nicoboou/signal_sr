@@ -5,7 +5,6 @@ import json
 import os
 import shutil
 import sys
-from datetime import datetime
 from pathlib import Path
 
 os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
@@ -13,7 +12,6 @@ os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
@@ -23,107 +21,22 @@ from PIL import Image
 from scipy.ndimage import binary_fill_holes
 from skimage import measure, morphology
 
-from posthoc.parasite_detector.detector import detect_parasites
 from prehoc.models.classifier import ClassifierImage
-from prehoc.utils.degradations import mc_psf_degrade, nyquist_lowpass
 
+from sr.utils.config import load_config as load_sr_config
+from sr.utils.seed import seed_everything
+
+from posthoc.parasite_detector.detector import detect_parasites
+from posthoc.utils.config import resolve_path, load_yaml, apply_overrides, make_run_output_dir
+from posthoc.data import build_eval_loader
+from posthoc.utils.misc import safe_tag, move_to_device, choose_device
+from posthoc.utils.metrics import binary_metrics, mask_iou, plot_curve, parasite_labels
+from posthoc.utils.degradations import degrade_batch, to_unit
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "runs/posthoc/sr_signal_sweep"
+DEFAULT_OUTPUT_DIR = REPO_ROOT / "src/posthoc/outputs/sr_signal_sweep"
 DEFAULT_NLM_MASK_ROOT = Path("/projects/compures/nicolas/cell_annotator/outputs")
 PLOT_METRICS = ("accuracy", "precision", "recall", "f1")
-
-
-def resolve_path(path):
-    path = Path(path)
-    return path if path.is_absolute() else REPO_ROOT / path
-
-
-def load_yaml(path):
-    with Path(path).open("r", encoding="utf-8") as handle:
-        return yaml.safe_load(handle) or {}
-
-
-def parse_levels(text):
-    return [float(value.strip()) for value in str(text).split(",") if value.strip()]
-
-
-def apply_overrides(config, args):
-    if args.output_dir:
-        config["output_dir"] = args.output_dir
-    if args.run_id:
-        config["run_id"] = args.run_id
-    if args.device:
-        config["device"] = args.device
-    if args.levels:
-        config.setdefault("degradation", {})["levels"] = parse_levels(args.levels)
-    if args.split:
-        config.setdefault("sr", {})["split"] = args.split
-    if args.sr_checkpoint:
-        config.setdefault("sr", {})["checkpoint"] = args.sr_checkpoint
-    if args.classifier_checkpoint:
-        config.setdefault("classifier", {})["checkpoint"] = args.classifier_checkpoint
-    if args.max_samples is not None:
-        config.setdefault("eval", {})["max_samples"] = int(args.max_samples)
-    return config
-
-
-def make_run_output_dir(base_output_dir, run_id=None):
-    base_output_dir = resolve_path(base_output_dir)
-    base_output_dir.mkdir(parents=True, exist_ok=True)
-    run_id = str(run_id) if run_id else datetime.now().strftime("%Y%m%d_%H%M")
-    for suffix in [""] + [f"_{i:02d}" for i in range(1, 100)]:
-        candidate = base_output_dir / f"{run_id}{suffix}"
-        try:
-            candidate.mkdir(parents=True, exist_ok=False)
-            return candidate, candidate.name
-        except FileExistsError:
-            continue
-    raise FileExistsError(f"Could not create a unique run directory under {base_output_dir} for run_id={run_id}")
-
-
-def safe_tag(value):
-    text = str(value).replace("-", "m").replace(".", "p")
-    return "".join(char if char.isalnum() or char in {"_", "-", "p", "m"} else "_" for char in text)
-
-
-def choose_device(device):
-    if str(device).startswith("cuda") and not torch.cuda.is_available():
-        print(f"Requested device {device}, but CUDA is unavailable. Falling back to CPU.")
-        return "cpu"
-    return str(device)
-
-
-def binary_metrics(y_true, y_score, threshold=0.5):
-    y_true = np.asarray(y_true).astype(int)
-    pred = (np.asarray(y_score) >= float(threshold)).astype(int)
-    tp = int(((pred == 1) & (y_true == 1)).sum())
-    tn = int(((pred == 0) & (y_true == 0)).sum())
-    fp = int(((pred == 1) & (y_true == 0)).sum())
-    fn = int(((pred == 0) & (y_true == 1)).sum())
-    precision = tp / (tp + fp) if tp + fp else 0.0
-    recall = tp / (tp + fn) if tp + fn else 0.0
-    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
-    return {"accuracy": float((pred == y_true).mean()), "precision": float(precision), "recall": float(recall), "f1": float(f1), "tp": tp, "tn": tn, "fp": fp, "fn": fn}
-
-
-def mask_iou(pred, true):
-    pred = np.asarray(pred).astype(bool)
-    true = np.asarray(true).astype(bool)
-    union = np.logical_or(pred, true).sum()
-    return float(np.logical_and(pred, true).sum() / union) if union else 1.0
-
-
-def interpolate(x, size, mode):
-    return F.interpolate(x, size=size, mode=mode) if mode in {"nearest", "area"} else F.interpolate(x, size=size, mode=mode, align_corners=False)
-
-
-def to_unit(x):
-    return ((x.detach().float() + 1.0) * 0.5).clamp(0.0, 1.0)
-
-
-def from_unit(x):
-    return (x.clamp(0.0, 1.0) * 2.0 - 1.0).clamp(-1.0, 1.0)
 
 
 def ids_from_batch(batch, start):
@@ -155,14 +68,6 @@ def slice_value(value, keep, batch_size):
     return value
 
 
-def parasite_labels(batch):
-    labels = batch.get("labels")
-    if labels is None:
-        raise ValueError("Posthoc evaluation requires labels in dataloader batches")
-    labels = labels.detach().cpu() if torch.is_tensor(labels) else torch.as_tensor(labels)
-    return labels[:, 0].numpy().astype(int) if labels.ndim > 1 else labels.numpy().astype(int)
-
-
 def resize_mask(mask, size):
     mask = torch.as_tensor(np.asarray(mask).astype(np.float32))[None, None]
     if tuple(mask.shape[-2:]) != (int(size), int(size)):
@@ -186,77 +91,6 @@ def true_masks(batch, data_name, mask_root, image_size):
     raise ValueError(f"Unsupported posthoc dataset: {data_name}")
 
 
-def degrade_batch(hr, level, cfg, sr_cfg, sample_ids):
-    cfg = cfg or {}
-    degradation_type = str(cfg.get("type", "bilinear"))
-    h = int(hr.shape[-1])
-    x = to_unit(hr)
-    downsample_mode = cfg.get("downsample_mode", "area")
-    upsample_mode = cfg.get("upsample_mode", "nearest")
-
-    if degradation_type in {"none", "identity"}:
-        lr_size = int(cfg.get("lr_size", sr_cfg.get("lr_size", h)))
-        lr = interpolate(x, (lr_size, lr_size), downsample_mode)
-        return from_unit(lr), from_unit(interpolate(lr, (h, h), upsample_mode))
-
-    if degradation_type == "bilinear":
-        lr_size = max(1, int(round(h / float(level))))
-        lr = interpolate(x, (lr_size, lr_size), "bilinear")
-        return from_unit(lr), from_unit(interpolate(lr, (h, h), "bilinear"))
-
-    arr = x.detach().cpu().numpy().astype(np.float32)
-    out = np.zeros_like(arr)
-    if degradation_type == "nyquist":
-        for channel in range(arr.shape[1]):
-            out[:, channel] = nyquist_lowpass(arr[:, channel], float(level), batch_size=int(cfg.get("batch_size", 128)), device=cfg.get("device", "cpu"))
-    elif degradation_type == "mc_psf":
-        seed = int(cfg.get("seed", 0))
-        for i, sample_id in enumerate(sample_ids):
-            for channel in range(arr.shape[1]):
-                out[i, channel] = mc_psf_degrade(
-                    arr[i : i + 1, channel],
-                    resolution_um_per_px=float(level),
-                    native_pixel_size_um=cfg.get("native_pixel_size_um", 0.1),
-                    continuous_upsampling_factor=cfg.get("continuous_upsampling_factor", 4),
-                    sigma0=cfg.get("mc_psf_sigma_hr_px", 1.0),
-                    n_samples=cfg.get("mc_n_samples", 8),
-                    seed=seed + int(sample_id),
-                )[0]
-    else:
-        raise ValueError(f"Unsupported degradation type: {degradation_type}")
-
-    degraded = torch.from_numpy(out).to(device=hr.device, dtype=hr.dtype)
-    lr_size = int(cfg.get("lr_size", sr_cfg.get("lr_size", h)))
-    lr = interpolate(degraded, (lr_size, lr_size), downsample_mode)
-    return from_unit(lr), from_unit(interpolate(lr, (h, h), upsample_mode))
-
-
-def move_to_device(value, device):
-    if torch.is_tensor(value):
-        return value.to(device)
-    if isinstance(value, dict):
-        return {key: move_to_device(item, device) for key, item in value.items()}
-    return value
-
-
-def build_eval_loader(sr_cfg, posthoc_cfg, split):
-    from sr.data import build_dataloader
-    from sr.splits import ensure_synthetic_split
-    from sr.utils.config import merge_dict
-
-    if sr_cfg.data.name == "synthetic_microscopy":
-        ensure_synthetic_split(sr_cfg)
-    data_cfg = merge_dict(sr_cfg.data, sr_cfg.get(f"{split}_data", {}))
-    data_cfg.return_pair = True
-    data_cfg.return_labels = True
-    data_cfg.return_metadata = True
-    if data_cfg.name == "synthetic_microscopy":
-        data_cfg.return_masks = True
-    batch_size = int(posthoc_cfg.get("sr", {}).get("batch_size", 4))
-    num_workers = int(posthoc_cfg.get("data", {}).get("num_workers", 0))
-    return build_dataloader(data_cfg, split=split, shuffle=False, batch_size=batch_size, num_workers=num_workers)
-
-
 def build_sr(sr_cfg, method, checkpoint, device):
     from sr.inference import Inverter, Sampler
     from sr.inference.inverter import freeze_for_inference
@@ -276,7 +110,9 @@ def build_sr(sr_cfg, method, checkpoint, device):
     noise_scheduler = build_noise_scheduler(sr_cfg.noise_scheduler)
     objective = Objective(sr_cfg.objective, noise_scheduler)
     sampler = Sampler(sr_cfg.sampling, objective, noise_scheduler, denoiser, conditioner, global_cfg=sr_cfg)
-    inverter = Inverter(sr_cfg.inversion, sr_cfg.sampling, objective, noise_scheduler, denoiser, conditioner, sampler) if method == "invert_sample" else None
+    inverter = (
+        Inverter(sr_cfg.inversion, sr_cfg.sampling, objective, noise_scheduler, denoiser, conditioner, sampler) if method == "invert_sample" else None
+    )
     if checkpoint:
         load_model_weights(checkpoint, denoiser=denoiser, conditioner=conditioner, map_location=device)
     freeze_for_inference(denoiser, conditioner)
@@ -290,14 +126,28 @@ def run_sr(method, batch, sr_cfg, denoiser, sampler, inverter):
             return sampler.dps_loop(torch.randn_like(batch["hr"]), batch, condition_domain="HR", conditioning_image=None)
     if method == "eps":
         with torch.no_grad():
-            return sampler.ddim_loop(torch.randn_like(batch["hr"]), batch, condition_domain="HR", conditioning_image=None, clip_denoised=sr_cfg.sampling.get("clip_denoised", None))
+            return sampler.ddim_loop(
+                torch.randn_like(batch["hr"]),
+                batch,
+                condition_domain="HR",
+                conditioning_image=None,
+                clip_denoised=sr_cfg.sampling.get("clip_denoised", None),
+            )
     if method == "spectral_sdedit_sr":
         from sr.inference import spectral_sdedit_sr
 
         native_cfg = sr_cfg.get("spectral_native_lr_sdedit", sr_cfg.sampling.get("spectral_native_lr_sdedit", {}))
         x_lr = batch["lr"] if native_cfg.get("enabled", False) else batch.get("lr", batch["lr_up"])
         with torch.no_grad():
-            x_sr, _, _ = spectral_sdedit_sr(x_lr=x_lr, batch=batch, model=denoiser, sampler=sampler, hr_scheduler=sampler.noise_scheduler, scale_r=sr_cfg.get("scale", int(sr_cfg.image_size) / int(sr_cfg.lr_size)), cfg=sr_cfg)
+            x_sr, _, _ = spectral_sdedit_sr(
+                x_lr=x_lr,
+                batch=batch,
+                model=denoiser,
+                sampler=sampler,
+                hr_scheduler=sampler.noise_scheduler,
+                scale_r=sr_cfg.get("scale", int(sr_cfg.image_size) / int(sr_cfg.lr_size)),
+                cfg=sr_cfg,
+            )
         return x_sr
     if method == "invert_sample":
         if inverter is None:
@@ -383,37 +233,13 @@ def save_masks(masks, output_dir, names):
     return paths
 
 
-def plot_curve(summary, y_columns, output_path, ylabel="Score"):
-    summary = summary.sort_values("level")
-    x = summary["level"].to_numpy(dtype=float)
-    fig, ax = plt.subplots(figsize=(6.2, 3.8))
-    for column in y_columns:
-        if column in summary:
-            ax.plot(x, summary[column].to_numpy(dtype=float), marker="o", linewidth=1.8, markersize=4.5, label=column)
-    ax.set_xlabel("Degradation level")
-    ax.set_ylabel(ylabel)
-    ax.set_ylim(-0.02, 1.02)
-    if len(x) > 2 and np.all(x > 0):
-        ax.set_xscale("log", base=2)
-        ax.set_xticks(x)
-        ax.set_xticklabels([f"{value:g}" for value in x])
-    ax.grid(axis="y", alpha=0.22)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.legend(frameon=False, ncol=2)
-    fig.tight_layout()
-    fig.savefig(output_path)
-    plt.close(fig)
-
-
 def run(config, config_path=None):
-    from sr.utils.config import load_config as load_sr_config
-    from sr.utils.seed import seed_everything
-
     seed_everything(int(config.get("seed", 0)))
     device = torch.device(choose_device(config.get("device", "cuda" if torch.cuda.is_available() else "cpu")))
-    output_dir, run_id = make_run_output_dir(config.get("output_dir", DEFAULT_OUTPUT_DIR), config.get("run_id"))
+    base_output_dir = resolve_path(config.get("output_dir", DEFAULT_OUTPUT_DIR))
+    output_dir, run_id = make_run_output_dir(base_output_dir, config.get("run_id"))
     config["run_id"] = run_id
+    config["base_output_dir"] = str(base_output_dir)
     config["output_dir"] = str(output_dir)
     print(f"Run ID: {run_id}")
     print(f"Output directory: {output_dir}")
@@ -440,7 +266,9 @@ def run(config, config_path=None):
     max_samples = config.get("eval", {}).get("max_samples")
     save_images = bool(config.get("eval", {}).get("save_images", True))
     data_name = sr_cfg.data.name
-    mask_root = resolve_path(config.get("data", {}).get("nlm_mask_outputs_root", config.get("data", {}).get("mask_outputs_root", DEFAULT_NLM_MASK_ROOT)))
+    mask_root = resolve_path(
+        config.get("data", {}).get("nlm_mask_outputs_root", config.get("data", {}).get("mask_outputs_root", DEFAULT_NLM_MASK_ROOT))
+    )
     detector_cfg = config.get("detector", {}).get("config", {}) or {}
 
     for level in config["degradation"]["levels"]:

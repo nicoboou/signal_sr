@@ -1,17 +1,17 @@
 seed: 42
-device: cuda
-output_dir: runs/posthoc/nlm_bilinear
+device: cuda:2
+output_dir: posthoc/outputs/nlm_bilinear
 run_id: null
 
 sr:
-  config: src/sr/configs/train/nlm_pixel_hr_linear_uncond.yaml
-  checkpoint: /path/to/sr/checkpoint-final
+  config: sr/configs/train/nlm_pixel_hr_linear_uncond.yaml
+  checkpoint: sr/outputs/nlm_pixel_uncond_hr_20260618_1831
   method: dps
   split: test
-  batch_size: 4
+  batch_size: 16
 
 classifier:
-  checkpoint: /path/to/prehoc/run/classifiers/bilinear_level1p0_seed0.pt
+  checkpoint: /projects/compures/nicolas/signal_sr/src/prehoc/outputs/nlm_bilinear_sweep/20260622_1804/classifiers/bilinear_level1p0_seed0_fold1.pt
   threshold: 0.5
 
 data:
